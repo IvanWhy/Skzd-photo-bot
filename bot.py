@@ -1,5 +1,7 @@
 import os
 import logging
+import uuid
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -24,7 +26,7 @@ MAIN_ADMIN_ID = int(os.getenv("MAIN_ADMIN_ID", 0))
 
 if not BOT_TOKEN: raise ValueError("❌ BOT_TOKEN не найден!")
 if not GEMINI_API_KEY: raise ValueError("❌ GEMINI_API_KEY не найден!")
-if not ADMIN_CHAT_ID: raise ValueError(" ADMIN_CHAT_ID не найден!")
+if not ADMIN_CHAT_ID: raise ValueError("❌ ADMIN_CHAT_ID не найден!")
 if not CHANNEL_ID: raise ValueError("❌ CHANNEL_ID не найден!")
 
 # Настройка Gemini
@@ -36,15 +38,16 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher(storage=MemoryStorage())
 logging.basicConfig(level=logging.INFO)
 
-# Хранилище фото на модерации
+# Хранилище фото на модерации (используем короткий ID вместо photo_id)
 pending_photos = {}
 
 # ==================== КЛАВИАТУРЫ ====================
-def get_admin_keyboard(photo_id: str):
+def get_admin_keyboard(short_id: str):
+    """Создаем клавиатуру с коротким ID (вместо длинного photo_id)"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{photo_id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{photo_id}")
+            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{short_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{short_id}")
         ]
     ])
 
@@ -52,18 +55,17 @@ def get_admin_keyboard(photo_id: str):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Привет! Я бот-предложка для фотогалереи.\n\n"
+        "👋 Привет! Я бот-предложка фотогалереи.\n\n"
         "📸 <b>Как это работает:</b>\n"
         "1. Отправь мне фото локомотива или поезда\n"
-        "2. ИИ проанализирует качество фото\n"
-        "3. Админы рассмотрят и опубликуют в канале\n\n"
+        "2. Админы рассмотрят и опубликуют в канале\n\n"
         "Просто отправь фото!"
     )
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
-        "📖 <b>Помощь:</b>\n\n"
+        " <b>Помощь:</b>\n\n"
         "/start - Запустить бота\n"
         "/help - Показать справку\n\n"
         "Просто отправь фото локомотива или поезда!"
@@ -75,7 +77,10 @@ async def handle_photo(message: types.Message):
     # Получаем фото (берем самое большое)
     photo = message.photo[-1]
     
-    await message.answer("⏳ Анализирую фото...")
+    await message.answer(" Анализирую фото...")
+    
+    # Генерируем короткий ID для callback_data (макс 64 байта)
+    short_id = str(uuid.uuid4())[:8]
     
     try:
         # Скачиваем фото
@@ -97,11 +102,11 @@ async def handle_photo(message: types.Message):
         
     except Exception as e:
         logging.error(f"Ошибка анализа фото: {e}")
-        ai_analysis = "⚠️ Не удалось проанализировать фото"
+        ai_analysis = "⚠️ Не удалось проанализировать фото (техническая ошибка)"
     
-    # Сохраняем фото для модерации
-    photo_id = photo.file_id
-    pending_photos[photo_id] = {
+    # Сохраняем фото для модерации с коротким ID
+    pending_photos[short_id] = {
+        "photo_id": photo.file_id,  # Реальный ID фото от Telegram
         "user_id": message.from_user.id,
         "username": message.from_user.username or message.from_user.first_name,
         "caption": message.caption or "",
@@ -121,46 +126,49 @@ async def handle_photo(message: types.Message):
         try:
             caption = (
                 f"📸 <b>Новое фото на модерацию</b>\n\n"
-                f"👤 <b>Автор:</b> @{pending_photos[photo_id]['username']}\n"
+                f"👤 <b>Автор:</b> @{pending_photos[short_id]['username']}\n"
                 f"🤖 <b>Анализ ИИ:</b>\n{ai_analysis}"
             )
-            if pending_photos[photo_id]['caption']:
-                caption += f"\n\n📝 <b>Описание от автора:</b>\n{pending_photos[photo_id]['caption']}"
+            if pending_photos[short_id]['caption']:
+                caption += f"\n\n📝 <b>Описание от автора:</b>\n{pending_photos[short_id]['caption']}"
             
             await bot.send_photo(
                 chat_id=admin_id,
-                photo=photo_id,
+                photo=photo.file_id,  # Используем реальный photo_id
                 caption=caption,
-                reply_markup=get_admin_keyboard(photo_id)
+                reply_markup=get_admin_keyboard(short_id)  # Используем короткий ID
             )
+            logging.info(f"Фото отправлено админу {admin_id}")
         except Exception as e:
             logging.error(f"Ошибка отправки админу {admin_id}: {e}")
 
 # ==================== ДЕЙСТВИЯ АДМИНОВ ====================
 @dp.callback_query(F.data.startswith("approve:"))
 async def approve_photo(callback: types.CallbackQuery):
-    photo_id = callback.data.split(":")[1]
+    short_id = callback.data.split(":")[1]
     
-    if photo_id not in pending_photos:
-        await callback.answer("⚠️ Фото уже обработано", show_alert=True)
+    if short_id not in pending_photos:
+        await callback.answer("️ Фото уже обработано", show_alert=True)
         return
     
-    photo_data = pending_photos.pop(photo_id)
+    photo_data = pending_photos.pop(short_id)
+    photo_id = photo_data["photo_id"]  # Получаем реальный photo_id
     
     # Публикуем в канал
     try:
         caption = (
-            f"📸 <b>Фото от @{photo_data['username']}</b>\n\n"
-            f" <b>Анализ ИИ:</b>\n{photo_data['ai_analysis']}"
+            f" <b>Фото от @{photo_data['username']}</b>\n\n"
+            f"🤖 <b>Анализ ИИ:</b>\n{photo_data['ai_analysis']}"
         )
         if photo_data['caption']:
             caption += f"\n\n📝 <b>Описание:</b>\n{photo_data['caption']}"
         
         await bot.send_photo(
             chat_id=CHANNEL_ID,
-            photo=photo_id,
+            photo=photo_id,  # Используем реальный photo_id
             caption=caption
         )
+        logging.info(f"Фото опубликовано в канале {CHANNEL_ID}")
     except Exception as e:
         logging.error(f"Ошибка публикации в канал: {e}")
     
@@ -173,7 +181,7 @@ async def approve_photo(callback: types.CallbackQuery):
                 f"✅ <b>Фото одобрено и опубликовано</b>\n\n"
                 f"👤 <b>Автор:</b> @{photo_data['username']}\n"
                 f"👮 <b>Админ:</b> {admin_username}\n"
-                f"⏰ <b>Время:</b> {__import__('datetime').datetime.now().strftime('%H:%M')}",
+                f"⏰ <b>Время:</b> {datetime.now().strftime('%H:%M')}",
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
@@ -184,7 +192,7 @@ async def approve_photo(callback: types.CallbackQuery):
         await bot.send_message(
             photo_data['user_id'],
             "✅ <b>Поздравляем!</b> Ваше фото одобрено и опубликовано в канале!\n\n"
-            "Спасибо за вклад в фотогалерею! 🚂📸"
+            "Спасибо за вклад в фотогалерею! 🚂"
         )
     except:
         pass
@@ -193,19 +201,19 @@ async def approve_photo(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("reject:"))
 async def reject_photo(callback: types.CallbackQuery):
-    photo_id = callback.data.split(":")[1]
+    short_id = callback.data.split(":")[1]
     
-    if photo_id not in pending_photos:
+    if short_id not in pending_photos:
         await callback.answer("⚠️ Фото уже обработано", show_alert=True)
         return
     
-    photo_data = pending_photos.pop(photo_id)
+    photo_data = pending_photos.pop(short_id)
     
     # Уведомляем пользователя
     try:
         await bot.send_message(
             photo_data['user_id'],
-            "❌ <b>Фото отклонено</b>\n\n"
+            " <b>Фото отклонено</b>\n\n"
             "К сожалению, ваше фото не прошло модерацию.\n"
             "Попробуйте отправить другое фото с лучшим качеством."
         )
@@ -220,11 +228,34 @@ WEBHOOK_URL = "https://skzd-photo-bot-ten.vercel.app/webhook"
 
 @app.on_event("startup")
 async def on_startup():
-    try:
-        await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
-        print("✅ Webhook установлен!")
-    except Exception as e:
-        print(f"❌ Ошибка установки webhook: {e}")
+    import asyncio
+    
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            # Проверяем текущий webhook
+            webhook_info = await bot.get_webhook_info()
+            
+            if webhook_info.url != WEBHOOK_URL:
+                await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
+                print(f"✅ Webhook установлен: {WEBHOOK_URL}")
+            else:
+                print(f"✅ Webhook уже установлен: {webhook_info.url}")
+            
+            return  # Успешно вышли из функции
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "Flood control" in error_msg or "Too Many Requests" in error_msg:
+                wait_time = (attempt + 1) * 2  # Ждем 2, 4, 6, 8, 10 секунд
+                print(f"⏳ Flood control. Ждем {wait_time} секунд... (попытка {attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"❌ Ошибка установки webhook: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+    
+    print("❌ Не удалось установить webhook после всех попыток")
 
 @app.on_event("shutdown")
 async def on_shutdown():
