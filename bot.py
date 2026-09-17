@@ -216,7 +216,7 @@ async def reject_photo(callback: types.CallbackQuery):
 
 # ==================== WEBHOOK ДЛЯ VERCEL ====================
 app = FastAPI()
-WEBHOOK_URL = "https://skzd-bot.vercel.app/webhook"
+WEBHOOK_URL = "https://skzd-photo-bot-ten.vercel.app/webhook"
 
 @app.on_event("startup")
 async def on_startup():
