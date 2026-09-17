@@ -41,6 +41,30 @@ logging.basicConfig(level=logging.INFO)
 # Хранилище фото
 pending_photos = {}
 
+# ==================== ПРОМПТ ДЛЯ ИИ ====================
+# Здесь можно настроить промпт для ИИ
+AI_PROMPT = """Ты эксперт по железнодорожному транспорту и фотографии. Проанализируй фото железнодорожного транспорта и создай структурированное описание.
+
+Входные данные от автора:
+- Время: {time}
+- Дата: {date}
+- Место: {location}
+- Поезд/ПС: {train_info}
+
+Твоя задача:
+1. Определи тип подвижного состава (электровоз, тепловоз, МВПС, вагон и т.д.)
+2. Если видна серия и номер - укажи их
+3. Оцени качество фотографии (резкость, освещение, композиция)
+4. Создай краткое описание для фотогалереи (2-3 предложения)
+
+Формат ответа:
+ **Тип:** [тип ПС]
+ **Серия/Номер:** [если видна]
+📊 **Качество:** [оценка 1-10 и краткий комментарий]
+📝 **Описание:** [краткое описание для публикации]
+
+Отвечай на русском языке. Будь точен в определениях."""
+
 # ==================== СОСТОЯНИЯ (FSM) ====================
 class PhotoForm(StatesGroup):
     waiting_photo = State()
@@ -62,6 +86,13 @@ def get_skip_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="⏭️ Пропустить")]
     ], resize_keyboard=True)
+
+def is_skip(text: str) -> bool:
+    """Проверяет, нажал ли пользователь 'Пропустить' (гибкая проверка)"""
+    if not text:
+        return True
+    text_lower = text.lower().strip()
+    return 'пропуст' in text_lower or text_lower == 'нет' or text_lower == '-'
 
 # ==================== КОМАНДЫ ====================
 @dp.message(Command("start"))
@@ -104,15 +135,17 @@ async def invalid_photo(message: types.Message):
 # ==================== ШАГ 2: ВРЕМЯ ====================
 @dp.message(PhotoForm.waiting_time)
 async def process_time(message: types.Message, state: FSMContext):
-    if message.text == "⏭️ Пропустить":
+    if is_skip(message.text):
         time_value = None
+        time_display = "️ Пропущено"
     else:
         time_value = message.text.strip()
+        time_display = time_value
     
     await state.update_data(time=time_value)
     
     await message.answer(
-        f"{'✅ Время: ' + time_value if time_value else '⏭️ Время пропущено'}\n\n"
+        f"✅ Время: {time_display}\n\n"
         "📅 <b>Введи дату</b> (например: 17.09.2026) или нажми '⏭️ Пропустить':",
         reply_markup=get_skip_keyboard()
     )
@@ -121,16 +154,18 @@ async def process_time(message: types.Message, state: FSMContext):
 # ==================== ШАГ 3: ДАТА ====================
 @dp.message(PhotoForm.waiting_date)
 async def process_date(message: types.Message, state: FSMContext):
-    if message.text == "️ Пропустить":
+    if is_skip(message.text):
         date_value = None
+        date_display = "⏭️ Пропущено"
     else:
         date_value = message.text.strip()
+        date_display = date_value
     
     await state.update_data(date=date_value)
     
     await message.answer(
-        f"{'✅ Дата: ' + date_value if date_value else '⏭️ Дата пропущена'}\n\n"
-        "📍 <b>Введи место/станцию/перегон</b> (например: ст. Адлер, перегон Каяла-Пасюк) или нажми '⏭️ Пропустить':",
+        f"✅ Дата: {date_display}\n\n"
+        "📍 <b>Введи место/станцию/перегон</b> (например: ст. Адлер, перегон Каяла-Пасюк) или нажми '️ Пропустить':",
         reply_markup=get_skip_keyboard()
     )
     await state.set_state(PhotoForm.waiting_location)
@@ -138,15 +173,17 @@ async def process_date(message: types.Message, state: FSMContext):
 # ==================== ШАГ 4: МЕСТО ====================
 @dp.message(PhotoForm.waiting_location)
 async def process_location(message: types.Message, state: FSMContext):
-    if message.text == "⏭️ Пропустить":
+    if is_skip(message.text):
         location = None
+        location_display = "⏭️ Пропущено"
     else:
         location = message.text.strip()
+        location_display = location
     
     await state.update_data(location=location)
     
     await message.answer(
-        f"{'✅ Место: ' + location if location else '⏭️ Место пропущено'}\n\n"
+        f"✅ Место: {location_display}\n\n"
         "🚆 <b>Введи информацию о поезде/ПС</b> (например: ЭП20-001, поезд 104 Москва-Адлер) или нажми '⏭️ Пропустить':",
         reply_markup=get_skip_keyboard()
     )
@@ -155,10 +192,12 @@ async def process_location(message: types.Message, state: FSMContext):
 # ==================== ШАГ 5: ИНФОРМАЦИЯ О ПОЕЗДЕ ====================
 @dp.message(PhotoForm.waiting_train_info)
 async def process_train_info(message: types.Message, state: FSMContext):
-    if message.text == "⏭️ Пропустить":
+    if is_skip(message.text):
         train_info = None
+        train_display = "⏭️ Пропущено"
     else:
         train_info = message.text.strip()
+        train_display = train_info
     
     await state.update_data(train_info=train_info)
     
@@ -172,20 +211,12 @@ async def process_train_info(message: types.Message, state: FSMContext):
     short_id = str(uuid.uuid4())[:8]
     
     # Формируем текст для ИИ
-    ai_input = f"""Фото железнодорожного транспорта.
-
-Информация от автора:
-- Время: {data.get('time') or 'не указано'}
-- Дата: {data.get('date') or 'не указана'}
-- Место: {data.get('location') or 'не указано'}
-- Поезд/ПС: {data.get('train_info') or 'не указано'}
-
-Проанализируй фото и создай структурированное описание:
-1. Что изображено (тип, серия, номер если видно)
-2. Качество фото (кратко)
-3. Создай красивое описание для фотогалереи на основе предоставленной информации
-
-Опиши кратко, на русском языке."""
+    ai_input = AI_PROMPT.format(
+        time=data.get('time') or 'не указано',
+        date=data.get('date') or 'не указана',
+        location=data.get('location') or 'не указано',
+        train_info=data.get('train_info') or 'не указано'
+    )
     
     try:
         # Скачиваем и анализируем фото
@@ -200,12 +231,12 @@ async def process_train_info(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка анализа: {e}")
         ai_description = "⚠️ Анализ недоступен"
     
-    # Формируем описание для публикации
+    # Формируем описание для публикации (ТОЛЬКО заполненные поля)
     description_parts = []
     if data.get('time'):
-        description_parts.append(f"🕐 Время: {data['time']}")
+        description_parts.append(f" Время: {data['time']}")
     if data.get('date'):
-        description_parts.append(f" Дата: {data['date']}")
+        description_parts.append(f"📅 Дата: {data['date']}")
     if data.get('location'):
         description_parts.append(f"📍 Место: {data['location']}")
     if data.get('train_info'):
@@ -226,11 +257,10 @@ async def process_train_info(message: types.Message, state: FSMContext):
     await message.answer(
         "✅ <b>Информация принята!</b>\n\n"
         f"📝 <b>Описание:</b>\n{description}\n\n"
-        f"🤖 <b>Анализ ИИ:</b>\n{ai_description}\n\n"
         " Отправлено на модерацию."
     )
     
-    # Отправляем админам
+    # Отправляем админам (С ИИ-анализом)
     admin_ids = [ADMIN_CHAT_ID] if isinstance(ADMIN_CHAT_ID, str) else ADMIN_CHAT_ID
     for admin_id in admin_ids:
         try:
@@ -238,7 +268,7 @@ async def process_train_info(message: types.Message, state: FSMContext):
                 f"📸 <b>Новое фото на модерацию</b>\n\n"
                 f"👤 <b>Автор:</b> @{pending_photos[short_id]['username']}\n\n"
                 f"📝 <b>Описание:</b>\n{description}\n\n"
-                f" <b>Анализ ИИ:</b>\n{ai_description}"
+                f"🤖 <b>Анализ ИИ:</b>\n{ai_description}"
             )
             
             await bot.send_photo(
@@ -264,7 +294,7 @@ async def approve_photo(callback: types.CallbackQuery):
     
     photo_data = pending_photos.pop(short_id)
     
-    # Публикуем в канал (ТОЛЬКО автор и описание, без анализа ИИ)
+    # Публикуем в канал (БЕЗ ИИ-анализа, только автор и описание)
     try:
         caption = (
             f"📸 <b>Фото от @{photo_data['username']}</b>\n\n"
@@ -289,7 +319,7 @@ async def approve_photo(callback: types.CallbackQuery):
                 f"✅ <b>Фото одобрено</b>\n\n"
                 f"👤 <b>Автор:</b> @{photo_data['username']}\n"
                 f"👮 <b>Админ:</b> {admin_username}\n"
-                f"⏰ <b>Время:</b> {datetime.now().strftime('%H:%M')}",
+                f" <b>Время:</b> {datetime.now().strftime('%H:%M')}",
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
@@ -300,7 +330,7 @@ async def approve_photo(callback: types.CallbackQuery):
         await bot.send_message(
             photo_data['user_id'],
             "✅ <b>Поздравляем!</b> Ваше фото опубликовано в канале!\n\n"
-            "Спасибо за вклад! 🚂📸"
+            "Спасибо за вклад! 🚂"
         )
     except:
         pass
@@ -379,7 +409,7 @@ async def errors_handler(event: types.ErrorEvent):
 
 @app.get("/")
 async def root():
-    return {"message": "Photo Bot is running! 📸"}
+    return {"message": "Photo Bot is running! "}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
