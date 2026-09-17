@@ -209,7 +209,7 @@ async def process_train_info(message: types.Message, state: FSMContext):
     data = await state.get_data()
     photo_id = data.get("photo_id")
     
-    await message.answer("⏳ Анализирую и структурирую информацию...", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer(" Анализирую и структурирую информацию...", reply_markup=types.ReplyKeyboardRemove())
     
     short_id = str(uuid.uuid4())[:8]
     
@@ -257,34 +257,34 @@ async def process_train_info(message: types.Message, state: FSMContext):
     )
     
     # Отправляем админам (фото + краткая подпись, анализ ИИ отдельным сообщением)
-admin_ids = [ADMIN_CHAT_ID] if isinstance(ADMIN_CHAT_ID, str) else ADMIN_CHAT_ID
-for admin_id in admin_ids:
-    try:
-        # Краткая подпись к фото (без ИИ-анализа)
-        short_caption = (
-            f"📸 <b>Новое фото на модерацию</b>\n\n"
-            f"👤 <b>Автор:</b> @{pending_photos[short_id]['username']}\n\n"
-            f"📝 <b>Описание:</b>\n{description}"
-        )
-        
-        # Отправляем фото с краткой подписью
-        photo_message = await bot.send_photo(
-            chat_id=admin_id,
-            photo=photo_id,
-            caption=short_caption,
-            reply_markup=get_admin_keyboard(short_id)
-        )
-        
-        # Отправляем анализ ИИ отдельным сообщением
-        await bot.send_message(
-            chat_id=admin_id,
-            text=f"🤖 <b>Анализ ИИ:</b>\n{ai_description}",
-            reply_to_message_id=photo_message.message_id
-        )
-        
-        logging.info(f"Фото отправлено админу {admin_id}")
-    except Exception as e:
-        logging.error(f"Ошибка отправки админу: {e}")
+    admin_ids = [ADMIN_CHAT_ID] if isinstance(ADMIN_CHAT_ID, str) else ADMIN_CHAT_ID
+    for admin_id in admin_ids:
+        try:
+            # Краткая подпись к фото (без ИИ-анализа, чтобы не превысить 1024 символа)
+            short_caption = (
+                f"📸 <b>Новое фото на модерацию</b>\n\n"
+                f"👤 <b>Автор:</b> @{pending_photos[short_id]['username']}\n\n"
+                f"📝 <b>Описание:</b>\n{description}"
+            )
+            
+            # Отправляем фото с краткой подписью и кнопками
+            photo_message = await bot.send_photo(
+                chat_id=admin_id,
+                photo=photo_id,
+                caption=short_caption,
+                reply_markup=get_admin_keyboard(short_id)
+            )
+            
+            # Отправляем анализ ИИ отдельным сообщением в ответ на фото
+            await bot.send_message(
+                chat_id=admin_id,
+                text=f"🤖 <b>Анализ ИИ:</b>\n{ai_description}",
+                reply_to_message_id=photo_message.message_id
+            )
+            
+            logging.info(f"Фото отправлено админу {admin_id}")
+        except Exception as e:
+            logging.error(f"Ошибка отправки админу: {e}")
     
     await state.clear()
 
