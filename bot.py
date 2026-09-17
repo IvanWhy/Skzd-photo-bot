@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.enums import ParseMode
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -38,12 +38,19 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher(storage=MemoryStorage())
 logging.basicConfig(level=logging.INFO)
 
-# Хранилище фото на модерации (используем короткий ID вместо photo_id)
+# Хранилище фото
 pending_photos = {}
+
+# ==================== СОСТОЯНИЯ (FSM) ====================
+class PhotoForm(StatesGroup):
+    waiting_photo = State()
+    waiting_time = State()
+    waiting_date = State()
+    waiting_location = State()
+    waiting_train_info = State()
 
 # ==================== КЛАВИАТУРЫ ====================
 def get_admin_keyboard(short_id: str):
-    """Создаем клавиатуру с коротким ID (вместо длинного photo_id)"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{short_id}"),
@@ -51,96 +58,200 @@ def get_admin_keyboard(short_id: str):
         ]
     ])
 
+def get_skip_keyboard():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="⏭️ Пропустить")]
+    ], resize_keyboard=True)
+
 # ==================== КОМАНДЫ ====================
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.set_state(PhotoForm.waiting_photo)
     await message.answer(
-        "👋 Привет! Я бот-предложка фотогалереи.\n\n"
+        "👋 Привет! Я бот-предложка для фотогалереи.\n\n"
         "📸 <b>Как это работает:</b>\n"
         "1. Отправь мне фото локомотива или поезда\n"
-        "2. Админы рассмотрят и опубликуют в канале\n\n"
-        "Просто отправь фото!"
+        "2. Укажи время, дату, место и информацию о поезде\n"
+        "3. ИИ структурирует информацию\n"
+        "4. Админы рассмотрят и опубликуют в канале\n\n"
+        "📷 <b>Отправь фото для начала:</b>"
     )
 
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    await message.answer(
-        " <b>Помощь:</b>\n\n"
-        "/start - Запустить бота\n"
-        "/help - Показать справку\n\n"
-        "Просто отправь фото локомотива или поезда!"
-    )
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Заполнение отменено. Напиши /start", reply_markup=types.ReplyKeyboardRemove())
 
-# ==================== ОБРАБОТКА ФОТО ====================
-@dp.message(F.photo)
-async def handle_photo(message: types.Message):
-    # Получаем фото (берем самое большое)
+# ==================== ШАГ 1: ФОТО ====================
+@dp.message(PhotoForm.waiting_photo, F.photo)
+async def process_photo(message: types.Message, state: FSMContext):
     photo = message.photo[-1]
     
-    await message.answer(" Анализирую фото...")
+    # Сохраняем фото
+    await state.update_data(photo_id=photo.file_id)
     
-    # Генерируем короткий ID для callback_data (макс 64 байта)
+    await message.answer(
+        "✅ Фото получено!\n\n"
+        "🕐 <b>Введи время</b> (например: 14:30) или нажми '⏭️ Пропустить':",
+        reply_markup=get_skip_keyboard()
+    )
+    await state.set_state(PhotoForm.waiting_time)
+
+@dp.message(PhotoForm.waiting_photo)
+async def invalid_photo(message: types.Message):
+    await message.answer("❌ Пожалуйста, отправь фото (изображение):")
+
+# ==================== ШАГ 2: ВРЕМЯ ====================
+@dp.message(PhotoForm.waiting_time)
+async def process_time(message: types.Message, state: FSMContext):
+    if message.text == "⏭️ Пропустить":
+        time_value = None
+    else:
+        time_value = message.text.strip()
+    
+    await state.update_data(time=time_value)
+    
+    await message.answer(
+        f"{'✅ Время: ' + time_value if time_value else '⏭️ Время пропущено'}\n\n"
+        "📅 <b>Введи дату</b> (например: 17.09.2026) или нажми '⏭️ Пропустить':",
+        reply_markup=get_skip_keyboard()
+    )
+    await state.set_state(PhotoForm.waiting_date)
+
+# ==================== ШАГ 3: ДАТА ====================
+@dp.message(PhotoForm.waiting_date)
+async def process_date(message: types.Message, state: FSMContext):
+    if message.text == "️ Пропустить":
+        date_value = None
+    else:
+        date_value = message.text.strip()
+    
+    await state.update_data(date=date_value)
+    
+    await message.answer(
+        f"{'✅ Дата: ' + date_value if date_value else '⏭️ Дата пропущена'}\n\n"
+        "📍 <b>Введи место/станцию/перегон</b> (например: ст. Адлер, перегон Каяла-Пасюк) или нажми '⏭️ Пропустить':",
+        reply_markup=get_skip_keyboard()
+    )
+    await state.set_state(PhotoForm.waiting_location)
+
+# ==================== ШАГ 4: МЕСТО ====================
+@dp.message(PhotoForm.waiting_location)
+async def process_location(message: types.Message, state: FSMContext):
+    if message.text == "⏭️ Пропустить":
+        location = None
+    else:
+        location = message.text.strip()
+    
+    await state.update_data(location=location)
+    
+    await message.answer(
+        f"{'✅ Место: ' + location if location else '⏭️ Место пропущено'}\n\n"
+        "🚆 <b>Введи информацию о поезде/ПС</b> (например: ЭП20-001, поезд 104 Москва-Адлер) или нажми '⏭️ Пропустить':",
+        reply_markup=get_skip_keyboard()
+    )
+    await state.set_state(PhotoForm.waiting_train_info)
+
+# ==================== ШАГ 5: ИНФОРМАЦИЯ О ПОЕЗДЕ ====================
+@dp.message(PhotoForm.waiting_train_info)
+async def process_train_info(message: types.Message, state: FSMContext):
+    if message.text == "⏭️ Пропустить":
+        train_info = None
+    else:
+        train_info = message.text.strip()
+    
+    await state.update_data(train_info=train_info)
+    
+    # Получаем все данные
+    data = await state.get_data()
+    photo_id = data.get("photo_id")
+    
+    await message.answer("⏳ Анализирую и структурирую информацию...", reply_markup=types.ReplyKeyboardRemove())
+    
+    # Генерируем короткий ID
     short_id = str(uuid.uuid4())[:8]
     
+    # Формируем текст для ИИ
+    ai_input = f"""Фото железнодорожного транспорта.
+
+Информация от автора:
+- Время: {data.get('time') or 'не указано'}
+- Дата: {data.get('date') or 'не указана'}
+- Место: {data.get('location') or 'не указано'}
+- Поезд/ПС: {data.get('train_info') or 'не указано'}
+
+Проанализируй фото и создай структурированное описание:
+1. Что изображено (тип, серия, номер если видно)
+2. Качество фото (кратко)
+3. Создай красивое описание для фотогалереи на основе предоставленной информации
+
+Опиши кратко, на русском языке."""
+    
     try:
-        # Скачиваем фото
-        photo_file = await bot.download(photo)
+        # Скачиваем и анализируем фото
+        photo_file = await bot.download(photo_id)
         photo_bytes = photo_file.read()
-        
-        # Анализируем через Gemini
         image = Image.open(io.BytesIO(photo_bytes))
         
-        prompt = """Проанализируй эту фотографию железнодорожного транспорта. Оцени:
-1. Что изображено (тип локомотива/поезда, если видно номер или серию)
-2. Качество фотографии (резкость, освещение, композиция, баланс белого)
-3. Подходит ли для публикации в фотогалерее (оцени по шкале 1-10)
-
-Дай краткий анализ на русском языке (3-4 предложения). Будь объективен."""
-        
-        response = model.generate_content([prompt, image])
-        ai_analysis = response.text
+        response = model.generate_content([ai_input, image])
+        ai_description = response.text
         
     except Exception as e:
-        logging.error(f"Ошибка анализа фото: {e}")
-        ai_analysis = "⚠️ Не удалось проанализировать фото (техническая ошибка)"
+        logging.error(f"Ошибка анализа: {e}")
+        ai_description = "⚠️ Анализ недоступен"
     
-    # Сохраняем фото для модерации с коротким ID
+    # Формируем описание для публикации
+    description_parts = []
+    if data.get('time'):
+        description_parts.append(f"🕐 Время: {data['time']}")
+    if data.get('date'):
+        description_parts.append(f" Дата: {data['date']}")
+    if data.get('location'):
+        description_parts.append(f"📍 Место: {data['location']}")
+    if data.get('train_info'):
+        description_parts.append(f"🚆 Поезд/ПС: {data['train_info']}")
+    
+    description = "\n".join(description_parts) if description_parts else "ℹ️ Информация не указана"
+    
+    # Сохраняем данные
     pending_photos[short_id] = {
-        "photo_id": photo.file_id,  # Реальный ID фото от Telegram
+        "photo_id": photo_id,
         "user_id": message.from_user.id,
         "username": message.from_user.username or message.from_user.first_name,
-        "caption": message.caption or "",
-        "ai_analysis": ai_analysis
+        "description": description,
+        "ai_analysis": ai_description
     }
     
-    # Отправляем пользователю подтверждение
+    # Отправляем пользователю
     await message.answer(
-        "✅ <b>Фото принято!</b>\n\n"
-        f"🤖 <b>Анализ ИИ:</b>\n{ai_analysis}\n\n"
-        "📬 Фото отправлено на модерацию админам."
+        "✅ <b>Информация принята!</b>\n\n"
+        f"📝 <b>Описание:</b>\n{description}\n\n"
+        f"🤖 <b>Анализ ИИ:</b>\n{ai_description}\n\n"
+        " Отправлено на модерацию."
     )
     
-    # Отправляем админам на модерацию
+    # Отправляем админам
     admin_ids = [ADMIN_CHAT_ID] if isinstance(ADMIN_CHAT_ID, str) else ADMIN_CHAT_ID
     for admin_id in admin_ids:
         try:
             caption = (
                 f"📸 <b>Новое фото на модерацию</b>\n\n"
-                f"👤 <b>Автор:</b> @{pending_photos[short_id]['username']}\n"
-                f"🤖 <b>Анализ ИИ:</b>\n{ai_analysis}"
+                f"👤 <b>Автор:</b> @{pending_photos[short_id]['username']}\n\n"
+                f"📝 <b>Описание:</b>\n{description}\n\n"
+                f" <b>Анализ ИИ:</b>\n{ai_description}"
             )
-            if pending_photos[short_id]['caption']:
-                caption += f"\n\n📝 <b>Описание от автора:</b>\n{pending_photos[short_id]['caption']}"
             
             await bot.send_photo(
                 chat_id=admin_id,
-                photo=photo.file_id,  # Используем реальный photo_id
+                photo=photo_id,
                 caption=caption,
-                reply_markup=get_admin_keyboard(short_id)  # Используем короткий ID
+                reply_markup=get_admin_keyboard(short_id)
             )
             logging.info(f"Фото отправлено админу {admin_id}")
         except Exception as e:
-            logging.error(f"Ошибка отправки админу {admin_id}: {e}")
+            logging.error(f"Ошибка отправки админу: {e}")
+    
+    await state.clear()
 
 # ==================== ДЕЙСТВИЯ АДМИНОВ ====================
 @dp.callback_query(F.data.startswith("approve:"))
@@ -152,25 +263,22 @@ async def approve_photo(callback: types.CallbackQuery):
         return
     
     photo_data = pending_photos.pop(short_id)
-    photo_id = photo_data["photo_id"]  # Получаем реальный photo_id
     
-    # Публикуем в канал
+    # Публикуем в канал (ТОЛЬКО автор и описание, без анализа ИИ)
     try:
         caption = (
-            f" <b>Фото от @{photo_data['username']}</b>\n\n"
-            f"🤖 <b>Анализ ИИ:</b>\n{photo_data['ai_analysis']}"
+            f"📸 <b>Фото от @{photo_data['username']}</b>\n\n"
+            f"{photo_data['description']}"
         )
-        if photo_data['caption']:
-            caption += f"\n\n📝 <b>Описание:</b>\n{photo_data['caption']}"
         
         await bot.send_photo(
             chat_id=CHANNEL_ID,
-            photo=photo_id,  # Используем реальный photo_id
+            photo=photo_data["photo_id"],
             caption=caption
         )
         logging.info(f"Фото опубликовано в канале {CHANNEL_ID}")
     except Exception as e:
-        logging.error(f"Ошибка публикации в канал: {e}")
+        logging.error(f"Ошибка публикации: {e}")
     
     # Уведомляем главного админа
     if MAIN_ADMIN_ID:
@@ -178,7 +286,7 @@ async def approve_photo(callback: types.CallbackQuery):
             admin_username = f"@{callback.from_user.username}" if callback.from_user.username else f"ID:{callback.from_user.id}"
             await bot.send_message(
                 MAIN_ADMIN_ID,
-                f"✅ <b>Фото одобрено и опубликовано</b>\n\n"
+                f"✅ <b>Фото одобрено</b>\n\n"
                 f"👤 <b>Автор:</b> @{photo_data['username']}\n"
                 f"👮 <b>Админ:</b> {admin_username}\n"
                 f"⏰ <b>Время:</b> {datetime.now().strftime('%H:%M')}",
@@ -191,8 +299,8 @@ async def approve_photo(callback: types.CallbackQuery):
     try:
         await bot.send_message(
             photo_data['user_id'],
-            "✅ <b>Поздравляем!</b> Ваше фото одобрено и опубликовано в канале!\n\n"
-            "Спасибо за вклад в фотогалерею! 🚂"
+            "✅ <b>Поздравляем!</b> Ваше фото опубликовано в канале!\n\n"
+            "Спасибо за вклад! 🚂📸"
         )
     except:
         pass
@@ -209,20 +317,18 @@ async def reject_photo(callback: types.CallbackQuery):
     
     photo_data = pending_photos.pop(short_id)
     
-    # Уведомляем пользователя
     try:
         await bot.send_message(
             photo_data['user_id'],
-            " <b>Фото отклонено</b>\n\n"
-            "К сожалению, ваше фото не прошло модерацию.\n"
-            "Попробуйте отправить другое фото с лучшим качеством."
+            "❌ <b>Фото отклонено</b>\n\n"
+            "Попробуй отправить другое фото."
         )
     except:
         pass
     
     await callback.answer("❌ Фото отклонено", show_alert=True)
 
-# ==================== WEBHOOK ДЛЯ VERCEL ====================
+# ==================== WEBHOOK ====================
 app = FastAPI()
 WEBHOOK_URL = "https://skzd-photo-bot-ten.vercel.app/webhook"
 
@@ -233,49 +339,27 @@ async def on_startup():
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            # Проверяем текущий webhook
             webhook_info = await bot.get_webhook_info()
-            
             if webhook_info.url != WEBHOOK_URL:
                 await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
                 print(f"✅ Webhook установлен: {WEBHOOK_URL}")
             else:
-                print(f"✅ Webhook уже установлен: {webhook_info.url}")
-            
-            return  # Успешно вышли из функции
-            
+                print(f"✅ Webhook уже установлен")
+            return
         except Exception as e:
-            error_msg = str(e)
-            if "Flood control" in error_msg or "Too Many Requests" in error_msg:
-                wait_time = (attempt + 1) * 2  # Ждем 2, 4, 6, 8, 10 секунд
-                print(f"⏳ Flood control. Ждем {wait_time} секунд... (попытка {attempt + 1}/{max_retries})")
-                await asyncio.sleep(wait_time)
+            if "Flood" in str(e):
+                await asyncio.sleep((attempt + 1) * 2)
             else:
-                print(f"❌ Ошибка установки webhook: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2)
-    
-    print("❌ Не удалось установить webhook после всех попыток")
+                print(f"❌ Ошибка: {e}")
+                await asyncio.sleep(2)
+    print("❌ Не удалось установить webhook")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.delete_webhook()
-    print("👋 Webhook удален!")
-
-webhook_installed = False
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    global webhook_installed
-    if not webhook_installed:
-        try:
-            info = await bot.get_webhook_info()
-            if info.url != WEBHOOK_URL:
-                await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
-                print("✅ Webhook обновлен!")
-            webhook_installed = True
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
     try:
         update = types.Update(**await request.json())
         await dp.feed_update(bot, update)
@@ -294,7 +378,6 @@ async def errors_handler(event: types.ErrorEvent):
     return False
 
 @app.get("/")
-@app.head("/")
 async def root():
     return {"message": "Photo Bot is running! 📸"}
 
