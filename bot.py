@@ -40,9 +40,9 @@ logging.basicConfig(level=logging.INFO)
 
 # Хранилище фото
 pending_photos = {}
+pending_rejections = {}  # Хранилище для отклонений с причиной
 
 # ==================== ПРОМПТ ДЛЯ ИИ ====================
-# Здесь можно настроить промпт для ИИ
 AI_PROMPT = """Ты эксперт по железнодорожному транспорту и фотографии. Проанализируй фото железнодорожного транспорта и создай структурированное описание.
 
 Входные данные от автора:
@@ -56,6 +56,12 @@ AI_PROMPT = """Ты эксперт по железнодорожному тра�
 2. Если видна серия и номер - укажи их
 3. Оцени качество фотографии (резкость, освещение, композиция)
 4. Создай краткое описание для фотогалереи (2-3 предложения)
+Скажи свое краткое мнение, укажи недостатки фотографии (если они есть), по типу: 
+Неудачное освещение(Морда или бок в тени), неудачная композиция(Есть предметы которые перекрывают ходовую часть или морду/бок поезда),
+Недоэкспонировано(кадр темный), Неправильный баланс белого (если фотка ушла сильно в желтый либо в синий цвета), 
+Неудачное кадрирование(например если контактная сеть обрезана или наполовину видна, есть объекты которые наполовину видны и их следует полностью добавить в кадр, либо убрать кадрированием),
+Чрезмерная (неуместная) обработка - если автор слишком сильно добавил насыщенности/красочности, резкости/текстуры. Если есть хроматические абберации, 
+посторонние предметы или люди в кадре (предметы которые сильно мешают в кадре), Завал горизонта вправо/влево,  Смазано (если номер локомотива нечитаем или сам локомотив и поезд не в фокусе)
 
 Формат ответа:
  **Тип:** [тип ПС]
@@ -72,6 +78,9 @@ class PhotoForm(StatesGroup):
     waiting_date = State()
     waiting_location = State()
     waiting_train_info = State()
+
+class RejectForm(StatesGroup):
+    waiting_reason = State()  # Состояние для ожидания причины отклонения
 
 # ==================== КЛАВИАТУРЫ ====================
 def get_admin_keyboard(short_id: str):
@@ -103,8 +112,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "📸 <b>Как это работает:</b>\n"
         "1. Отправь мне фото локомотива или поезда\n"
         "2. Укажи время, дату, место и информацию о поезде\n"
-        "3. ИИ структурирует информацию\n"
-        "4. Админы рассмотрят и опубликуют в канале\n\n"
+        "3. Админы рассмотрят и опубликуют в канале\n"
         "📷 <b>Отправь фото для начала:</b>"
     )
 
@@ -117,8 +125,6 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 @dp.message(PhotoForm.waiting_photo, F.photo)
 async def process_photo(message: types.Message, state: FSMContext):
     photo = message.photo[-1]
-    
-    # Сохраняем фото
     await state.update_data(photo_id=photo.file_id)
     
     await message.answer(
@@ -130,14 +136,14 @@ async def process_photo(message: types.Message, state: FSMContext):
 
 @dp.message(PhotoForm.waiting_photo)
 async def invalid_photo(message: types.Message):
-    await message.answer("❌ Пожалуйста, отправь фото (изображение):")
+    await message.answer(" Пожалуйста, отправь фото (изображение):")
 
 # ==================== ШАГ 2: ВРЕМЯ ====================
 @dp.message(PhotoForm.waiting_time)
 async def process_time(message: types.Message, state: FSMContext):
     if is_skip(message.text):
         time_value = None
-        time_display = "️ Пропущено"
+        time_display = "⏭️ Пропущено"
     else:
         time_value = message.text.strip()
         time_display = time_value
@@ -165,7 +171,7 @@ async def process_date(message: types.Message, state: FSMContext):
     
     await message.answer(
         f"✅ Дата: {date_display}\n\n"
-        "📍 <b>Введи место/станцию/перегон</b> (например: ст. Адлер, перегон Каяла-Пасюк) или нажми '️ Пропустить':",
+        "📍 <b>Введи место/станцию/перегон</b> (например: ст. Адлер, перегон Каяла-Пасюк) или нажми '⏭️ Пропустить':",
         reply_markup=get_skip_keyboard()
     )
     await state.set_state(PhotoForm.waiting_location)
@@ -200,17 +206,13 @@ async def process_train_info(message: types.Message, state: FSMContext):
         train_display = train_info
     
     await state.update_data(train_info=train_info)
-    
-    # Получаем все данные
     data = await state.get_data()
     photo_id = data.get("photo_id")
     
     await message.answer("⏳ Анализирую и структурирую информацию...", reply_markup=types.ReplyKeyboardRemove())
     
-    # Генерируем короткий ID
     short_id = str(uuid.uuid4())[:8]
     
-    # Формируем текст для ИИ
     ai_input = AI_PROMPT.format(
         time=data.get('time') or 'не указано',
         date=data.get('date') or 'не указана',
@@ -219,19 +221,15 @@ async def process_train_info(message: types.Message, state: FSMContext):
     )
     
     try:
-        # Скачиваем и анализируем фото
         photo_file = await bot.download(photo_id)
         photo_bytes = photo_file.read()
         image = Image.open(io.BytesIO(photo_bytes))
-        
         response = model.generate_content([ai_input, image])
         ai_description = response.text
-        
     except Exception as e:
         logging.error(f"Ошибка анализа: {e}")
         ai_description = "⚠️ Анализ недоступен"
     
-    # Формируем описание для публикации (ТОЛЬКО заполненные поля)
     description_parts = []
     if data.get('time'):
         description_parts.append(f" Время: {data['time']}")
@@ -244,7 +242,6 @@ async def process_train_info(message: types.Message, state: FSMContext):
     
     description = "\n".join(description_parts) if description_parts else "ℹ️ Информация не указана"
     
-    # Сохраняем данные
     pending_photos[short_id] = {
         "photo_id": photo_id,
         "user_id": message.from_user.id,
@@ -253,14 +250,12 @@ async def process_train_info(message: types.Message, state: FSMContext):
         "ai_analysis": ai_description
     }
     
-    # Отправляем пользователю
     await message.answer(
         "✅ <b>Информация принята!</b>\n\n"
         f"📝 <b>Описание:</b>\n{description}\n\n"
-        " Отправлено на модерацию."
+        "📬 Отправлено на модерацию."
     )
     
-    # Отправляем админам (С ИИ-анализом)
     admin_ids = [ADMIN_CHAT_ID] if isinstance(ADMIN_CHAT_ID, str) else ADMIN_CHAT_ID
     for admin_id in admin_ids:
         try:
@@ -289,12 +284,11 @@ async def approve_photo(callback: types.CallbackQuery):
     short_id = callback.data.split(":")[1]
     
     if short_id not in pending_photos:
-        await callback.answer("️ Фото уже обработано", show_alert=True)
+        await callback.answer("⚠️ Фото уже обработано", show_alert=True)
         return
     
     photo_data = pending_photos.pop(short_id)
     
-    # Публикуем в канал (БЕЗ ИИ-анализа, только автор и описание)
     try:
         caption = (
             f"📸 <b>Фото от @{photo_data['username']}</b>\n\n"
@@ -310,27 +304,25 @@ async def approve_photo(callback: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка публикации: {e}")
     
-    # Уведомляем главного админа
     if MAIN_ADMIN_ID:
         try:
             admin_username = f"@{callback.from_user.username}" if callback.from_user.username else f"ID:{callback.from_user.id}"
             await bot.send_message(
                 MAIN_ADMIN_ID,
                 f"✅ <b>Фото одобрено</b>\n\n"
-                f"👤 <b>Автор:</b> @{photo_data['username']}\n"
-                f"👮 <b>Админ:</b> {admin_username}\n"
-                f" <b>Время:</b> {datetime.now().strftime('%H:%M')}",
+                f" <b>Автор:</b> @{photo_data['username']}\n"
+                f" <b>Админ:</b> {admin_username}\n"
+                f"⏰ <b>Время:</b> {datetime.now().strftime('%H:%M')}",
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
             logging.error(f"Ошибка уведомления: {e}")
     
-    # Уведомляем пользователя
     try:
         await bot.send_message(
             photo_data['user_id'],
             "✅ <b>Поздравляем!</b> Ваше фото опубликовано в канале!\n\n"
-            "Спасибо за вклад! 🚂"
+            "Спасибо за вклад! 🚂📸"
         )
     except:
         pass
@@ -338,25 +330,103 @@ async def approve_photo(callback: types.CallbackQuery):
     await callback.answer("✅ Фото опубликовано!", show_alert=True)
 
 @dp.callback_query(F.data.startswith("reject:"))
-async def reject_photo(callback: types.CallbackQuery):
+async def start_reject(callback: types.CallbackQuery, state: FSMContext):
+    """Начало процесса отклонения - запрашиваем причину у админа"""
     short_id = callback.data.split(":")[1]
     
     if short_id not in pending_photos:
         await callback.answer("⚠️ Фото уже обработано", show_alert=True)
         return
     
-    photo_data = pending_photos.pop(short_id)
+    # Сохраняем данные об отклонении
+    pending_rejections[short_id] = {
+        "photo_data": pending_photos[short_id],
+        "admin_id": callback.from_user.id,
+        "admin_username": callback.from_user.username or callback.from_user.first_name
+    }
     
+    await callback.message.answer(
+        "✏️ <b>Напишите причину отклонения:</b>\n\n"
+        "Например: <i>Низкое качество фото, не видно номер локомотива, дубликат</i>\n\n"
+        "Или нажмите '️ Без причины' для отклонения без указания причины:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭️ Без причины", callback_data=f"reject_no_reason:{short_id}")]
+        ])
+    )
+    
+    await state.set_state(RejectForm.waiting_reason)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("reject_no_reason:"))
+async def reject_no_reason(callback: types.CallbackQuery, state: FSMContext):
+    """Отклонение без указания причины"""
+    short_id = callback.data.split(":")[1]
+    
+    if short_id not in pending_rejections:
+        await callback.answer("⚠️ Данные не найдены", show_alert=True)
+        return
+    
+    await process_rejection(short_id, "Причина не указана", callback.from_user.id, state)
+    await callback.answer("❌ Фото отклонено", show_alert=True)
+
+@dp.message(RejectForm.waiting_reason)
+async def process_reject_reason(message: types.Message, state: FSMContext):
+    """Обработка причины отклонения от админа"""
+    # Ищем отклонение для этого админа
+    short_id = None
+    for sid, data in pending_rejections.items():
+        if data["admin_id"] == message.from_user.id:
+            short_id = sid
+            break
+    
+    if not short_id:
+        await message.answer("️ Нет активных отклонений. Напишите /cancel")
+        await state.clear()
+        return
+    
+    reason = message.text.strip()
+    await process_rejection(short_id, reason, message.from_user.id, state)
+    await message.answer(f"✅ Фото отклонено с причиной: {reason}")
+
+async def process_rejection(short_id: str, reason: str, admin_id: int, state: FSMContext):
+    """Общий процесс отклонения фото"""
+    if short_id not in pending_rejections:
+        return
+    
+    rejection_data = pending_rejections.pop(short_id)
+    photo_data = rejection_data["photo_data"]
+    
+    # Удаляем из pending_photos
+    pending_photos.pop(short_id, None)
+    
+    # Уведомляем пользователя с причиной
     try:
         await bot.send_message(
             photo_data['user_id'],
-            "❌ <b>Фото отклонено</b>\n\n"
-            "Попробуй отправить другое фото."
+            f"❌ <b>Фото отклонено</b>\n\n"
+            f"📋 <b>Причина:</b> {reason}\n\n"
+            "Попробуйте отправить другое фото с лучшим качеством."
         )
     except:
         pass
     
-    await callback.answer("❌ Фото отклонено", show_alert=True)
+    # Уведомляем главного админа
+    if MAIN_ADMIN_ID:
+        try:
+            admin_username = rejection_data["admin_username"]
+            await bot.send_message(
+                MAIN_ADMIN_ID,
+                f"❌ <b>Фото отклонено</b>\n\n"
+                f"👤 <b>Автор:</b> @{photo_data['username']}\n"
+                f"👮 <b>Отклонил:</b> @{admin_username}\n"
+                f"📋 <b>Причина:</b> {reason}\n"
+                f"⏰ <b>Время:</b> {datetime.now().strftime('%H:%M')}",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logging.error(f"Ошибка уведомления: {e}")
+    
+    await state.clear()
 
 # ==================== WEBHOOK ====================
 app = FastAPI()
@@ -409,7 +479,7 @@ async def errors_handler(event: types.ErrorEvent):
 
 @app.get("/")
 async def root():
-    return {"message": "Photo Bot is running! "}
+    return {"message": "Photo Bot is running! 📸"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
