@@ -487,9 +487,16 @@ async def errors_handler(event: types.ErrorEvent):
         if "query is too old" in str(event.exception): return True
     return False
 
+from fastapi import Response
+
 @app.get("/")
-async def root():
+async def root_get():
     return {"status": "ok"}
+
+@app.head("/")
+async def root_head():
+    """Обработка HEAD запросов от UptimeRobot"""
+    return Response(status_code=200, headers={"Content-Type": "application/json"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
