@@ -31,7 +31,7 @@ if not CHANNEL_ID: raise ValueError("CHANNEL_ID не найден!")
 
 # Настройка Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-3.6-flash') # или gemini-2.0-flash, если 3.6 недоступен
+model = genai.GenerativeModel('gemini-2.5-flash-lite') # или gemini-2.0-flash, если 3.6 недоступен
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
