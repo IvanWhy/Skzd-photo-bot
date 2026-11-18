@@ -12,26 +12,17 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 from aiogram.enums import ParseMode
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
-import google.generativeai as genai
-from PIL import Image
-import io
 import uvicorn
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 MAIN_ADMIN_ID = int(os.getenv("MAIN_ADMIN_ID", 0))
 
 if not BOT_TOKEN: raise ValueError("BOT_TOKEN не найден!")
-if not GEMINI_API_KEY: raise ValueError("GEMINI_API_KEY не найден!")
 if not ADMIN_CHAT_ID: raise ValueError("ADMIN_CHAT_ID не найден!")
 if not CHANNEL_ID: raise ValueError("CHANNEL_ID не найден!")
-
-# Настройка Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash-lite') # или gemini-2.0-flash, если 3.6 недоступен
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -41,30 +32,6 @@ logging.basicConfig(level=logging.INFO)
 # Хранилища
 pending_photos = {}
 pending_rejections = {}
-
-# ==================== ПРОМПТ ДЛЯ ИИ (БЕЗ СМАЙЛИКОВ) ====================
-AI_PROMPT = """Ты эксперт по городскому и железнодорожному транспорту, а также по фотографии. Проанализируй фото транспорта (трамвай, троллейбус, поезд, электровоз, тепловоз, МВПС и т.д.) и создай структурированное описание.
-
-Входные данные от автора:
-- Время: {time}
-- Дата: {date}
-- Место: {location}
-- Транспорт/ПС: {train_info}
-
-Твоя задача:
-1. Определи тип транспортного средства (трамвай, троллейбус, электровоз, тепловоз, МВПС, вагон и т.д.)
-2. Если видна серия и номер (бортовой или инвентарный) - укажи их
-3. Оцени качество фотографии (резкость, освещение, композиция, баланс белого)
-4. Создай краткое описание для фотогалереи (2-3 предложения)
-Укажи недостатки фотографии (если они есть), по типу: неудачное освещение, неудачная композиция (предметы перекрывают транспорт), недоэкспонировано, неправильный баланс белого, неудачное кадрирование, чрезмерная обработка, посторонние предметы или люди в кадре, завал горизонта, смазано.
-
-Формат ответа (СТРОГО БЕЗ СМАЙЛИКОВ И ЭМОДЗИ):
-Тип: [тип транспорта]
-Серия/Номер: [если видна]
-Качество: [оценка 1-10 и краткий комментарий]
-Описание: [краткое описание для публикации]
-
-Отвечай на русском языке. Будь точен в определениях, расскажи обо всем как можно кратко."""
 
 # ==================== СОСТОЯНИЯ (FSM) ====================
 class PhotoForm(StatesGroup):
@@ -191,37 +158,16 @@ async def process_location(message: types.Message, state: FSMContext):
 async def process_train_info(message: types.Message, state: FSMContext):
     if is_skip(message.text):
         train_info = None
-        train_display = "Пропущено"
     else:
         train_info = message.text.strip()
-        train_display = train_info
     
     await state.update_data(train_info=train_info)
     data = await state.get_data()
     photo_id = data.get("photo_id")
     
-    await message.answer("Анализирую и структурирую информацию...", reply_markup=types.ReplyKeyboardRemove())
-    
     short_id = str(uuid.uuid4())[:8]
     
-    ai_input = AI_PROMPT.format(
-        time=data.get('time') or 'не указано',
-        date=data.get('date') or 'не указана',
-        location=data.get('location') or 'не указано',
-        train_info=data.get('train_info') or 'не указано'
-    )
-    
-    try:
-        photo_file = await bot.download(photo_id)
-        photo_bytes = photo_file.read()
-        image = Image.open(io.BytesIO(photo_bytes))
-        response = model.generate_content([ai_input, image])
-        ai_description = response.text
-    except Exception as e:
-        logging.error(f"Ошибка анализа: {e}")
-        ai_description = "Анализ недоступен"
-    
-    # Формируем описание БЕЗ смайликов
+    # Формируем описание на основе данных пользователя (БЕЗ ИИ)
     description_parts = []
     if data.get('time'):
         description_parts.append(f"Время: {data['time']}")
@@ -238,37 +184,31 @@ async def process_train_info(message: types.Message, state: FSMContext):
         "photo_id": photo_id,
         "user_id": message.from_user.id,
         "username": message.from_user.username or message.from_user.first_name,
-        "description": description,
-        "ai_analysis": ai_description
+        "description": description
     }
     
     await message.answer(
         "Информация принята!\n\n"
         f"Описание:\n{description}\n\n"
-        "Отправлено на модерацию."
+        "Отправлено на модерацию.",
+        reply_markup=types.ReplyKeyboardRemove()
     )
     
-    # Отправляем админам (без смайликов)
+    # Отправляем админам
     admin_ids = [ADMIN_CHAT_ID] if isinstance(ADMIN_CHAT_ID, str) else ADMIN_CHAT_ID
     for admin_id in admin_ids:
         try:
-            short_caption = (
+            caption = (
                 f"Новое фото на модерацию\n\n"
                 f"Автор: @{pending_photos[short_id]['username']}\n\n"
                 f"Описание:\n{description}"
             )
             
-            photo_message = await bot.send_photo(
+            await bot.send_photo(
                 chat_id=admin_id,
                 photo=photo_id,
-                caption=short_caption,
+                caption=caption,
                 reply_markup=get_admin_keyboard(short_id)
-            )
-            
-            await bot.send_message(
-                chat_id=admin_id,
-                text=f"Анализ ИИ:\n{ai_description}",
-                reply_to_message_id=photo_message.message_id
             )
             logging.info(f"Фото отправлено админу {admin_id}")
         except Exception as e:
